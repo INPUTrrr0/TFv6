@@ -105,6 +105,9 @@ def _classify(change: float) -> int:
 class TransfuserV6CvprPolicy:
     """TFv6 from the CVPR branch, behind `ego_policy_v1`."""
 
+    #: Consecutive ticks a changed command must hold before it is issued.
+    COMMAND_HOLD_TICKS = 5
+
     def __init__(self, request: Optional[Dict[str, Any]] = None):
         self.request = dict(request or {})
         params = dict(self.request.get("parameters") or {})
@@ -119,6 +122,9 @@ class TransfuserV6CvprPolicy:
         self._torch = None
         self._steps = 0
         self._commands: List[str] = []
+        self._last_nav = None
+        self._command = LANEFOLLOW
+        self._pending = 0
 
     def sensors(self) -> List[Dict[str, Any]]:
         return [dict(s) for s in SENSORS] + [dict(s) for s in RADARS]
@@ -161,6 +167,9 @@ class TransfuserV6CvprPolicy:
     def reset(self) -> None:
         self._steps = 0
         self._commands = []
+        self._last_nav = None
+        self._command = LANEFOLLOW
+        self._pending = 0
 
     def close(self) -> None:
         self.inference = None
@@ -230,18 +239,53 @@ class TransfuserV6CvprPolicy:
         route = observation.get("route") or []
         points = [(float(p[0]), float(p[1])) for p in route
                   if isinstance(p, (list, tuple)) and len(p) >= 2]
+        names = ("LEFT", "RIGHT", "STRAIGHT", "LANEFOLLOW")
+
         if not points:
-            return ((0.0, 0.0), (8.0, 0.0), (16.0, 0.0),
-                    ("LANEFOLLOW", "LANEFOLLOW", LANEFOLLOW, LANEFOLLOW))
+            # A route that has run out is not a route that says "go straight".
+            # Padding a target point 16 m ahead of the ego, as this first did,
+            # is an instruction, and the ego obeys it: it drove straight out of
+            # a left turn once the reference path ended. With nothing to aim at,
+            # hold the last target points that were real and keep the last
+            # command, so the manoeuvre in progress is not cancelled by the
+            # route simply ending.
+            if self._last_nav is not None:
+                return self._last_nav
+            return (0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (
+                names[LANEFOLLOW], names[LANEFOLLOW], LANEFOLLOW, LANEFOLLOW)
 
         def at(index):
             return points[min(index, len(points) - 1)]
 
-        half = points[: max(3, len(points) // 2)]
-        near = _classify(_heading_change(half))
-        far = _classify(_heading_change(points))
-        names = ("LEFT", "RIGHT", "STRAIGHT", "LANEFOLLOW")
-        return at(0), at(7), at(15), (names[near], names[far], near, far)
+        # The manoeuvre is the whole visible route's heading change, not a
+        # near-window's. A window that moves with the ego re-decides the command
+        # every tick: at 20 Hz this flickered LEFT -> LANEFOLLOW -> LEFT while
+        # the ego approached a junction it was supposed to turn at. Upstream's
+        # command does not flicker because it is attached to a target point
+        # rather than recomputed from wherever the ego happens to be.
+        raw = _classify(_heading_change(points))
+        current = self._stabilise(raw)
+        nav = (at(0), at(7), at(15),
+               (names[current], names[raw], current, raw))
+        self._last_nav = nav
+        return nav
+
+    def _stabilise(self, raw: int) -> int:
+        """Only accept a changed command after it has held for a few ticks.
+
+        Hysteresis, because the classification is a threshold on a continuous
+        quantity and the route wobbles as the ego moves along it. Without this a
+        single noisy tick can hand the network a LANEFOLLOW in the middle of a
+        turn.
+        """
+        if raw == self._command:
+            self._pending = 0
+            return self._command
+        self._pending += 1
+        if self._pending >= self.COMMAND_HOLD_TICKS:
+            self._command = raw
+            self._pending = 0
+        return self._command
 
     def _stitch(self, sensors: Dict[str, Any]) -> np.ndarray:
         """The three views as one CHW strip, left to right in rig order."""
