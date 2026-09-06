@@ -173,12 +173,19 @@ class TransfuserV6CvprPolicy:
         self._steps += 1
         if not self._commands or self._commands[-1] != commands[0]:
             self._commands.append(commands[0])
+        # The three target points go into meta so a harness can show what the
+        # network was actually conditioned on. A video that shows only the world
+        # cannot distinguish "drove straight through a junction it was told to
+        # turn at" from "was never told to turn".
+        points = [batch[key][0].tolist() for key in
+                  ("target_point_previous", "target_point", "target_point_next")]
         return {
             "control": {"throttle": float(prediction.throttle),
                         "steer": float(prediction.steer),
                         "brake": float(prediction.brake)},
             "meta": {"policy": "tfv6", "step": self._steps,
-                     "command": commands[0], "next_command": commands[1]},
+                     "command": commands[0], "next_command": commands[1],
+                     "target_points": points},
         }
 
     # ---------------------------------------------------------------- #
