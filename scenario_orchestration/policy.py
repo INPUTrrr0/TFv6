@@ -58,10 +58,32 @@ RADARS: List[Dict[str, Any]] = [
 ]
 CAMERA_ORDER = ("PCAM_L0", "PCAM_F0", "PCAM_R0")
 
-DEFAULT_CHECKPOINT = os.environ.get(
-    "TFV6_CHECKPOINT",
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                 "outputs", "checkpoints", "tfv6_resnet34"))
+def _default_checkpoint() -> str:
+    """$TFV6_CHECKPOINT, else the first cvpr2026 weights directory that exists.
+
+    The in-repo location `outputs/checkpoints/tfv6_resnet34` is where a
+    training run writes, and on this cluster the released weights were never
+    placed there -- they live in the shared store under
+    `$AV_CKPT/tfv6_cvpr2026/tfv6_resnet34`. Returning a path that does not
+    exist turned every caller that passed no `checkpoint` into a crash, so the
+    shared store is tried too, and the in-repo path stays last so a local
+    training output still wins when there is one.
+    """
+    env = os.environ.get("TFV6_CHECKPOINT")
+    if env:
+        return env
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [os.path.join(repo, "outputs", "checkpoints", "tfv6_resnet34")]
+    if os.environ.get("AV_CKPT"):
+        candidates.append(os.path.join(os.environ["AV_CKPT"], "tfv6_cvpr2026",
+                                       "tfv6_resnet34"))
+    for c in candidates:
+        if os.path.isfile(os.path.join(c, "config.json")):
+            return c
+    return candidates[-1]
+
+
+DEFAULT_CHECKPOINT = _default_checkpoint()
 
 # command_to_one_hot's index order: the RoadOption enum value minus one.
 # RUNBOOK.md section 1 has the table.
